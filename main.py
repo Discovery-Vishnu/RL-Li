@@ -52,13 +52,13 @@ class SupabaseManager:
             logger.error(f"Failed to fetch pending URLs from Supabase: {e}")
             return []
 
-    def update_result(self, record_id: Any, data: Dict[str, Any]):
+    def update_result(self, url: str, data: Dict[str, Any]):
         """Update a row in Supabase with the scraped data."""
         try:
-            response = self.client.table(self.table_name).update(data).eq("id", record_id).execute()
+            response = self.client.table(self.table_name).update(data).eq("url", url).execute()
             return response.data
         except Exception as e:
-            logger.error(f"Failed to update record {record_id} in Supabase: {e}")
+            logger.error(f"Failed to update record for {url} in Supabase: {e}")
             return None
 
 
@@ -107,7 +107,7 @@ class LinkedInScraper:
             logger.debug(f"Interaction error (ignored): {e}")
 
     @classmethod
-    def scrape_url(cls, record_id: Any, url: str) -> Dict[str, Any]:
+    def scrape_url(cls, url: str) -> Dict[str, Any]:
         """Worker function to scrape a single URL with high stealth."""
         max_retries = 3
         for attempt in range(max_retries):
@@ -140,7 +140,7 @@ class LinkedInScraper:
                             logger.warning(f"Login wall detected for {url}. Retrying ({attempt + 1}/{max_retries})...")
                             time.sleep(random.uniform(2, 5))
                             continue
-                        return {"id": record_id, "url": url, "error": "Login wall", "status": "error"}
+                        return {"url": url, "error": "Login wall", "status": "error"}
 
                     # Extraction Logic
                     name = page.locator("h1").first.inner_text().strip() if page.locator("h1").count() > 0 else "N/A"
@@ -149,7 +149,7 @@ class LinkedInScraper:
                             logger.warning(f"Failed to scrape data (Name not found) for {url}. Retrying ({attempt + 1}/{max_retries})...")
                             time.sleep(random.uniform(2, 5))
                             continue
-                        return {"id": record_id, "url": url, "error": "Name not found (scraping failed)", "status": "error"}
+                        return {"url": url, "error": "Name not found (scraping failed)", "status": "error"}
                     
                     bio = "N/A"
                     for sel in ["p.about-us__description", "section.about-us p", ".top-card-layout__second-subline"]:
@@ -198,7 +198,6 @@ class LinkedInScraper:
                             website = match.group(1)
 
                     data = {
-                        "id": record_id,
                         "url": url,
                         "name": name,
                         "bio": bio,
@@ -219,9 +218,9 @@ class LinkedInScraper:
                     time.sleep(random.uniform(2, 5))
                 else:
                     logger.error(f"Error {url}: {str(e)}. Max retries reached.")
-                    return {"id": record_id, "url": url, "error": str(e), "status": "error"}
+                    return {"url": url, "error": str(e), "status": "error"}
                     
-        return {"id": record_id, "url": url, "error": "Max retries exceeded", "status": "error"}
+        return {"url": url, "error": "Max retries exceeded", "status": "error"}
 
 def run_scraper():
     logger.info("Starting LinkedIn Scaler with Supabase integration...")
@@ -246,26 +245,28 @@ def run_scraper():
     # 2. Scrape with ThreadPoolExecutor
     results = []
     with ThreadPoolExecutor(max_workers=settings.max_workers) as executor:
-        # submit tasks (pass record id and url)
+        # submit tasks (pass url)
         future_to_record = {
-            executor.submit(LinkedInScraper.scrape_url, rec.get("id"), rec.get("url")): rec 
+            executor.submit(LinkedInScraper.scrape_url, rec.get("url")): rec 
             for rec in pending_records if rec.get("url")
         }
         
         for future in as_completed(future_to_record):
             record = future_to_record[future]
+            url = record.get("url")
             try:
                 data = future.result()
                 results.append(data)
                 
                 # 3. Write result back to Supabase in real-time
-                record_id = data.pop("id")
-                db.update_result(record_id, data)
-                logger.info(f"Updated record {record_id} in database.")
+                # Remove url from data dictionary if we only want to update other fields,
+                # but updating url with the same url is fine.
+                db.update_result(url, data)
+                logger.info(f"Updated record {url} in database.")
             except Exception as exc:
-                logger.error(f"Record {record.get('id')} ({record.get('url')}) generated an exception: {exc}")
+                logger.error(f"Record ({url}) generated an exception: {exc}")
                 # Try to write error status back
-                db.update_result(record.get("id"), {"error": str(exc), "status": "error"})
+                db.update_result(url, {"error": str(exc), "status": "error"})
 
     logger.info(f"Batch complete. Processed {len(results)} records.")
 
