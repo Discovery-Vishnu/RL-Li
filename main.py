@@ -9,9 +9,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 from typing import Any, Dict, List, Optional
 
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from camoufox.sync_api import Camoufox
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from supabase import create_client, Client
 
 # Configure structured logging
 logging.basicConfig(
@@ -25,8 +26,7 @@ class Settings(BaseSettings):
     """
     Configuration via Environment Variables.
     """
-    supabase_url: str = "https://your-project-id.supabase.co"
-    supabase_key: str = "your-anon-or-service-role-key"
+    database_url: str = "postgresql://user:pass@host:port/dbname"
     supabase_table_name: str = "linkedin_profiles"
     max_workers: int = 1
     batch_size: int = 10
@@ -35,31 +35,49 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
-class SupabaseManager:
-    """Manages interactions with Supabase database."""
+class DatabaseManager:
+    """Manages direct PostgreSQL database interactions."""
     
-    def __init__(self, url: str, key: str, table_name: str):
-        self.client: Client = create_client(url, key)
+    def __init__(self, db_url: str, table_name: str):
+        self.db_url = db_url
         self.table_name = table_name
 
-    def fetch_pending_urls(self, limit: int = 50) -> List[Dict[str, Any]]:
-        """Fetch rows that haven't been scraped yet. Assumes a 'status' column exists."""
+    def get_connection(self):
+        """Returns a new connection to the database."""
+        return psycopg2.connect(self.db_url)
+
+    def fetch_pending_urls(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """Fetch rows that haven't been scraped yet."""
         try:
-            response = self.client.table(self.table_name).select("*")\
-                .eq("status", "pending").limit(limit).execute()
-            return response.data
+            with self.get_connection() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    query = f"SELECT * FROM {self.table_name} WHERE status = 'pending' LIMIT %s;"
+                    cur.execute(query, (limit,))
+                    results = cur.fetchall()
+                    # Convert RealDictRow to standard dict
+                    return [dict(row) for row in results]
         except Exception as e:
-            logger.error(f"Failed to fetch pending URLs from Supabase: {e}")
+            logger.error(f"Failed to fetch pending URLs from PostgreSQL: {e}")
             return []
 
     def update_result(self, url: str, data: Dict[str, Any]):
-        """Update a row in Supabase with the scraped data."""
+        """Update a row in PostgreSQL with the scraped data."""
         try:
-            response = self.client.table(self.table_name).update(data).eq("url", url).execute()
-            return response.data
+            with self.get_connection() as conn:
+                with conn.cursor() as cur:
+                    # Construct dynamic SET clause
+                    columns = list(data.keys())
+                    set_clause = ", ".join([f"{col} = %s" for col in columns])
+                    
+                    values = list(data.values())
+                    values.append(url) # For the WHERE clause
+                    
+                    query = f"UPDATE {self.table_name} SET {set_clause} WHERE url = %s;"
+                    cur.execute(query, values)
+            return True
         except Exception as e:
-            logger.error(f"Failed to update record for {url} in Supabase: {e}")
-            return None
+            logger.error(f"Failed to update record for {url} in PostgreSQL: {e}")
+            return False
 
 
 def check_internet() -> bool:
@@ -223,12 +241,11 @@ class LinkedInScraper:
         return {"url": url, "error": "Max retries exceeded", "status": "error"}
 
 def run_scraper():
-    logger.info("Starting LinkedIn Scaler with Supabase integration...")
+    logger.info("Starting LinkedIn Scaler with PostgreSQL integration...")
     
     # Initialize DB manager
-    db = SupabaseManager(
-        url=settings.supabase_url,
-        key=settings.supabase_key,
+    db = DatabaseManager(
+        db_url=settings.database_url,
         table_name=settings.supabase_table_name
     )
 
@@ -258,9 +275,7 @@ def run_scraper():
                 data = future.result()
                 results.append(data)
                 
-                # 3. Write result back to Supabase in real-time
-                # Remove url from data dictionary if we only want to update other fields,
-                # but updating url with the same url is fine.
+                # 3. Write result back to PostgreSQL in real-time
                 db.update_result(url, data)
                 logger.info(f"Updated record {url} in database.")
             except Exception as exc:
