@@ -11,3 +11,4 @@ Reason:
 The camoufox headless browser caused heavy OS dependency issues and crashes on Railway. Replaced it with a lightweight HTTP requests-based scraper.
 Related tests:
 test_scraper.py
+bn

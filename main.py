@@ -23,6 +23,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("linkedin_scaler")
 
+# test comment
+
 class Settings(BaseSettings):
     """
     Configuration via Environment Variables.
